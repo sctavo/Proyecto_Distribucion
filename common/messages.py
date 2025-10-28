@@ -1,0 +1,1 @@
+# tipos de mensajes y validación de mensajes
