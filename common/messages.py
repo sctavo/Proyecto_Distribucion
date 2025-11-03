@@ -75,10 +75,12 @@ def deserialize(message_bytes: bytes):
         msg_type = data.pop("tipo", None) # Extrae el tipo y lo quita del dict
 
         if msg_type == "PRECIO_UPDATE":
-            # Pasamos el resto de los datos como argumentos
+            ## Mapeamos 'combustible' (del JSON) a 'tipo_combustible' (del constructor)
+            data['tipo_combustible'] = data.pop('combustible')
             return PrecioUpdateMessage(**data)
             
         elif msg_type == "PRECIO_LOCAL":
+            data['tipo_combustible'] = data.pop('combustible')
             return PrecioLocalUpdateMessage(**data)
             
         elif msg_type == "TRANSACCION":
