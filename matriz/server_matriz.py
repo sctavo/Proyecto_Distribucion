@@ -5,23 +5,22 @@ import sys
 import os
 
 # --- INICIO: Hack para importar 'common' ---
-# Esto es necesario porque 'server_matriz.py' está en un subdirectorio
-# y necesitamos acceder al paquete 'common' que está en el directorio raíz.
-
-# Obtiene el directorio del script actual (matriz)
 script_dir = os.path.dirname(os.path.abspath(__file__))
-# Sube un nivel para llegar al directorio raíz del proyecto (Proyecto_Distribucion)
 project_root = os.path.dirname(script_dir)
-# Añade el directorio raíz al sys.path
 sys.path.append(project_root)
 
-# Ahora podemos importar desde 'common'
 from common.framer import frame_message, receive_message
 from common.messages import (
     serialize, deserialize, PrecioUpdateMessage, 
     TransaccionReportMessage, HeartbeatMessage
 )
 # --- FIN: Hack para importar 'common' ---
+
+# --- INICIO: Importaciones para la GUI ---
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox
+from datetime import datetime
+# --- FIN: Importaciones para la GUI ---
 
 
 # Constantes
@@ -30,44 +29,49 @@ PORT = 65432        # Puerto para la Matriz
 COMBUSTIBLES = ["93", "95", "97", "Diesel", "Kerosene"] # Tipos válidos
 
 class MatrizServer:
-    def __init__(self, host, port):
+    # --- MODIFICADO: Añadido 'log_callback' ---
+    def __init__(self, host, port, log_callback):
         self.host = host
         self.port = port
+        self.log_callback = log_callback # Función para enviar logs a la GUI
         self.server_socket = None
-        # Lista para guardar los sockets de los distribuidores conectados
         self.distribuidores = []
-        # Un "candado" para proteger el acceso a la lista self.distribuidores
-        # (ya que será accedida desde múltiples hilos)
         self.lock = threading.Lock()
+
+    def log(self, message):
+        """Envía un mensaje de log a la GUI (o a la consola si no hay GUI)."""
+        now = datetime.now().strftime("%H:%M:%S")
+        if self.log_callback:
+            self.log_callback(f"[{now}] {message}")
+        else:
+            print(f"[{now}] {message}")
 
     def start(self):
         """Inicia el servidor y escucha conexiones."""
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen()
-        print(f"🏠 Servidor Matriz escuchando en {self.host}:{self.port}")
+        # --- MODIFICADO: Usar self.log ---
+        self.log(f"🏠 Servidor Matriz escuchando en {self.host}:{self.port}")
 
         try:
             while True:
-                # Acepta una nueva conexión
                 client_socket, addr = self.server_socket.accept()
-                print(f"📦 Nueva conexión de Distribuidor desde {addr}")
+                # --- MODIFICADO: Usar self.log ---
+                self.log(f"📦 Nueva conexión de Distribuidor desde {addr}")
 
-                # Añade el socket a la lista de forma segura
                 with self.lock:
                     self.distribuidores.append(client_socket)
 
-                # Inicia un nuevo hilo para manejar a este cliente
-                # El hilo ejecutará la función self.handle_distribuidor
                 client_thread = threading.Thread(
                     target=self.handle_distribuidor, 
                     args=(client_socket, addr)
                 )
-                client_thread.daemon = True # El hilo morirá si el programa principal cierra
+                client_thread.daemon = True
                 client_thread.start()
                 
-        except KeyboardInterrupt:
-            print("Cerrando servidor Matriz...")
+        except Exception:
+            self.log("Cerrando servidor Matriz...")
         finally:
             self.server_socket.close()
 
@@ -75,103 +79,195 @@ class MatrizServer:
         """Maneja la comunicación entrante de un solo distribuidor."""
         try:
             while True:
-                # 1. Recibe un mensaje (usando el framer)
                 msg_bytes = receive_message(client_socket)
-
                 if msg_bytes is None:
-                    # El cliente se desconectó limpiamente
-                    print(f"🔌 Distribuidor {addr} desconectado.")
+                    # --- MODIFICADO: Usar self.log ---
+                    self.log(f"🔌 Distribuidor {addr} desconectado.")
                     break
                 
-                # 2. Deserializa el mensaje
                 msg_obj = deserialize(msg_bytes)
 
-                # 3. Procesa el mensaje
                 if isinstance(msg_obj, TransaccionReportMessage):
-                    # TODO: Aquí guardaríamos en la BD Central [cite: 95]
-                    print(f"📈 Reporte de '{msg_obj.distribuidor_id}' ({addr}): "
-                        f"Surtidor {msg_obj.surtidor_id}, "
-                          f"{msg_obj.combustible}, {msg_obj.litros}L, {msg_obj.cargas} cargas")
+                    # TODO: Aquí guardaríamos en la BD Central
+                    # --- MODIFICADO: Usar self.log ---
+                    log_msg = (f"📈 Reporte de '{msg_obj.distribuidor_id}' ({addr}): "
+                               f"Surtidor {msg_obj.surtidor_id}, "
+                               f"{msg_obj.combustible}, {msg_obj.litros:.2f}L, {msg_obj.cargas} cargas")
+                    self.log(log_msg)
                           
                 elif isinstance(msg_obj, HeartbeatMessage):
-                    print(f"❤️ Heartbeat de {msg_obj.id} ({addr}): {msg_obj.estado}")
+                    # --- MODIFICADO: Usar self.log ---
+                    self.log(f"❤️ Heartbeat de {msg_obj.id} ({addr}): {msg_obj.estado}")
                     
                 else:
-                    print(f"🤔 Mensaje desconocido de {addr}: {msg_obj}")
+                    # --- MODIFICADO: Usar self.log ---
+                    self.log(f"🤔 Mensaje desconocido de {addr}: {msg_obj}")
 
         except ConnectionError as e:
-            print(f"❌ Error de conexión con {addr}: {e}")
+            # --- MODIFICADO: Usar self.log ---
+            self.log(f"❌ Error de conexión con {addr}: {e}")
         finally:
-            # Sin importar qué pase, removemos al cliente de la lista
             with self.lock:
                 self.distribuidores.remove(client_socket)
             client_socket.close()
-            print(f"Cerrada conexión con {addr}")
+            # self.log(f"Cerrada conexión con {addr}") # Log opcional
 
     def broadcast_price(self, combustible, precio_base):
         """Envía una actualización de precio a TODOS los distribuidores."""
-        print(f"📣 Transmitiendo nuevo precio: {combustible} a ${precio_base}")
+        # --- MODIFICADO: Usar self.log ---
+        self.log(f"📣 Transmitiendo nuevo precio: {combustible} a ${precio_base}")
         
         msg_obj = PrecioUpdateMessage(combustible, precio_base)
         msg_bytes = serialize(msg_obj)
         framed_msg = frame_message(msg_bytes)
         
-        # Lista de clientes que se desconectaron
         disconnected_clients = []
-
         with self.lock:
             for sock in self.distribuidores:
                 try:
                     sock.sendall(framed_msg)
                 except Exception as e:
-                    print(f"Error enviando a {sock.getpeername()}: {e}")
+                    # --- MODIFICADO: Usar self.log ---
+                    self.log(f"Error enviando a {sock.getpeername()}: {e}")
                     disconnected_clients.append(sock)
 
-            # Limpiamos la lista de clientes desconectados
             for sock in disconnected_clients:
                 self.distribuidores.remove(sock)
-                sock.close() # Cerramos el socket
+                sock.close()
         
-        print(f"✅ Precio enviado a {len(self.distribuidores)} distribuidores.")
+        # --- MODIFICADO: Usar self.log ---
+        self.log(f"✅ Precio enviado a {len(self.distribuidores)} distribuidores.")
 
-    def run_admin_cli(self):
-        """Simula la Interfaz de Admin  usando la línea de comandos."""
-        print("\n--- Interfaz de Admin Matriz ---")
-        print("Tipos de combustible: 93, 95, 97, Diesel, Kerosene")
-        print("Escriba 'salir' para terminar.")
+    # --- ELIMINADO: run_admin_cli() ---
+    # Esta función ha sido reemplazada por la clase AdminApp
+
+
+# --- INICIO: Nueva Clase para la GUI ---
+
+class AdminApp:
+    def __init__(self, root_window):
+        self.root = root_window
+        self.root.title("Admin Matriz (Nivel 3)")
+        self.root.geometry("600x450") # Tamaño inicial
         
-        while True:
-            try:
-                comb = input("Ingrese combustible: ").strip().capitalize()
-                if comb.lower() == 'salir':
-                    break
-                
-                # Validación simple
-                if comb not in [c.capitalize() for c in COMBUSTIBLES]:
-                    print("Error: Tipo de combustible no válido.")
-                    continue
-                
-                precio_str = input(f"Ingrese precio base para {comb}: ")
-                precio = int(precio_str)
+        # Aplicar un estilo moderno
+        self.style = ttk.Style()
+        self.style.theme_use('clam') # 'clam', 'alt', 'default', 'vista'
+        
+        # --- Configurar el contenedor principal ---
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # --- 1. Frame de Controles (Arriba) ---
+        controls_frame = ttk.Labelframe(main_frame, text="Control de Precios", padding="10")
+        controls_frame.pack(fill=tk.X, expand=False, pady=5)
+        
+        # Layout de 2x3
+        controls_frame.columnconfigure(1, weight=1) # Columna de entry/combo se expande
+        
+        # Fila 1: Combustible
+        ttk.Label(controls_frame, text="Combustible:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        self.comb_var = tk.StringVar()
+        self.comb_dropdown = ttk.Combobox(
+            controls_frame, 
+            textvariable=self.comb_var, 
+            values=COMBUSTIBLES,
+            state="readonly" # Evita que el usuario escriba
+        )
+        self.comb_dropdown.grid(row=0, column=1, padx=5, pady=5, sticky=tk.EW)
+        
+        # Fila 2: Precio
+        ttk.Label(controls_frame, text="Precio Base:").grid(row=1, column=0, padx=5, pady=5, sticky=tk.W)
+        self.precio_entry = ttk.Entry(controls_frame)
+        self.precio_entry.grid(row=1, column=1, padx=5, pady=5, sticky=tk.EW)
 
-                # Llama a la función de broadcast
-                self.broadcast_price(comb, precio)
+        # Fila 2 (col 2): Botón
+        self.send_button = ttk.Button(
+            controls_frame, 
+            text="Transmitir Precio", 
+            command=self.on_send_price
+        )
+        self.send_button.grid(row=0, column=2, rowspan=2, padx=10, pady=5, sticky="NS")
 
-            except ValueError:
-                print("Error: El precio debe ser un número entero.")
-            except Exception as e:
-                print(f"Error inesperado en CLI: {e}")
+        # --- 2. Frame de Logs (Abajo) ---
+        logs_frame = ttk.Labelframe(main_frame, text="Logs del Servidor", padding="10")
+        logs_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        self.log_text = scrolledtext.ScrolledText(
+            logs_frame, 
+            wrap=tk.WORD, 
+            state='disabled', # Empieza como solo lectura
+            height=15
+        )
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+        
+        # --- Referencia al Servidor (se seteará después) ---
+        self.server = None
+
+    def on_send_price(self):
+        """Callback del botón 'Transmitir Precio'."""
+        comb = self.comb_var.get()
+        precio_str = self.precio_entry.get()
+        
+        # --- Validación ---
+        if not comb:
+            messagebox.showerror("Error", "Debe seleccionar un tipo de combustible.")
+            return
+            
+        try:
+            precio_int = int(precio_str)
+            if precio_int <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Error", "El precio debe ser un número entero positivo.")
+            return
+
+        # Si todo está OK, llamar al broadcast del servidor
+        if self.server:
+            # El broadcast ya se encarga de loguear
+            self.server.broadcast_price(comb, precio_int)
+            
+            # Limpiar el campo de precio
+            self.precio_entry.delete(0, tk.END)
+        else:
+            messagebox.showerror("Error", "El servidor no está conectado.")
+            
+    def log_to_widget(self, message):
+        """Función thread-safe para añadir logs al widget de texto."""
+        try:
+            # Habilitar para escribir
+            self.log_text.config(state='normal')
+            self.log_text.insert(tk.END, message + "\n")
+            # Deshabilitar de nuevo
+            self.log_text.config(state='disabled')
+            # Auto-scroll al final
+            self.log_text.see(tk.END)
+        except Exception as e:
+            print(f"Error al loguear en GUI: {e}")
+
+# --- FIN: Nueva Clase para la GUI ---
 
 
-# --- Punto de entrada del script ---
+# --- Punto de entrada del script (MODIFICADO) ---
 if __name__ == "__main__":
-    server = MatrizServer(HOST, PORT)
+    
+    # 1. Crear la ventana principal de la GUI
+    root = tk.Tk()
+    
+    # 2. Crear la aplicación (la GUI)
+    app = AdminApp(root)
 
-    # Inicia el servidor (aceptar conexiones) en un hilo separado
+    # 3. Crear la instancia del servidor, pasándole la función de log de la GUI
+    server = MatrizServer(HOST, PORT, app.log_to_widget)
+
+    # 4. Darle a la GUI una referencia al servidor (para el botón de "Transmitir")
+    app.server = server
+
+    # 5. Inicia el servidor (aceptar conexiones) en un hilo separado
     server_thread = threading.Thread(target=server.start, daemon=True)
     server_thread.start()
 
-    # El hilo principal se convierte en la Interfaz de Admin
-    server.run_admin_cli()
+    # 6. Inicia el bucle principal de la GUI (esto reemplaza a run_admin_cli())
+    root.mainloop()
 
     print("Cerrando programa...")
