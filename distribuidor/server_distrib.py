@@ -35,8 +35,7 @@ class DistribuidorServer:
         self.port = port  # Puerto en el que escucha a los Surtidores
         
         # ---  Base de datos local --- #
-        self.db_path = f"distribuidor/db_local_{self.id}.sqlite" # <--- DESCOMENTAR PARA BDs SEPARADAS
-        # self.db_path = "distribuidor/db_local.sqlite" # (Usamos una BD compartida para la prueba local) <- No funciona porque se crea condicion de carrera entre distribuidores
+        self.db_path = f"distribuidor/db_local_{self.id}.sqlite"
         self._init_db() # Llama a la función de la base de datos
 
         # --- Estado del Servidor (Nivel 2) ---
@@ -45,7 +44,6 @@ class DistribuidorServer:
         self.lock_surtidores = threading.Lock() # Lock para la lista de surtidores
         
         # --- Caché Local y Lógica de Negocio ---
-        # El "caché local de precios" para operar de forma autónoma 
         self.current_prices = {} # Ej: {'95': 1650, '93': 1600}
         self.lock_prices = threading.Lock()
         
@@ -54,17 +52,13 @@ class DistribuidorServer:
         self.lock_matriz_socket = threading.Lock()
         self.is_connected_to_matriz = threading.Event() # Flag para saber el estado
 
-    # --- INICIO: Funciones de Base de Datos (Corregidas) ---
-    # Estas funciones DEBEN estar DENTRO de la clase DistribuidorServer
+    # --- INICIO: Funciones de Base de Datos ---
 
     def _init_db(self):
         """Inicializa la base de datos SQLite y crea la tabla si no existe."""
         try:
-            # os.makedirs(os.path.dirname(self.db_path), exist_ok=True) # <--- DESCOMENTAR SI USAS BDs SEPARADAS
+            # os.makedirs(os.path.dirname(self.db_path), exist_ok=True) # Opcional
             
-            # Conexión a la BD (se crea si no existe)
-            # 'check_same_thread=False' es necesario porque escribiremos a la BD
-            # desde múltiples hilos (los 'handle_surtidor').
             conn = sqlite3.connect(self.db_path, check_same_thread=False)
             cursor = conn.cursor()
             
@@ -82,16 +76,14 @@ class DistribuidorServer:
             )
             """)
             
-            # TODO: Crear tabla para la cola de sincronización (para el requisito de tolerancia a fallos)
-            
             conn.commit()
             conn.close()
             print(f"Base de datos local inicializada en: {self.db_path}")
         except Exception as e:
             print(f"Error inicializando la base de datos: {e}")
 
-    def _save_transaction(self, msg: TransaccionReportMessage):
-        """Guarda un reporte de transacción en la base de datos local."""
+    def _save_transaction(self, msg: TransaccionReportMessage) -> int | None:
+        """Guarda un reporte de transacción y retorna su ID de BD."""
         try:
             conn = sqlite3.connect(self.db_path, check_same_thread=False)
             cursor = conn.cursor()
@@ -112,27 +104,39 @@ class DistribuidorServer:
             )
             
             cursor.execute(sql, params)
+            new_id = cursor.lastrowid # <--- OBTENER EL ID
             conn.commit()
             conn.close()
-            # print(f"Transacción de {msg.surtidor_id} guardada en BD local.") # Log opcional
+            return new_id # <--- RETORNAR EL ID
             
         except Exception as e:
             print(f"Error guardando transacción en BD local: {e}")
+            return None
+
+    def _update_transaction_sync_status(self, db_id: int):
+        """Marca una transacción como sincronizada en la BD local."""
+        try:
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            cursor = conn.cursor()
+            sql = "UPDATE transacciones SET sincronizado_matriz = 1 WHERE id = ?"
+            cursor.execute(sql, (db_id,))
+            conn.commit()
+            conn.close()
+            # print(f"Transacción {db_id} marcada como sincronizada.") # Log opcional
+        except Exception as e:
+            print(f"Error actualizando estado sync de {db_id}: {e}")
 
     # --- FIN: Funciones de Base de Datos ---
 
     def start(self):
         """Inicia los dos hilos principales: el servidor y el cliente."""
         
-        # Hilo 1: Inicia el servidor para escuchar a los surtidores
         server_thread = threading.Thread(
             target=self.run_server_for_surtidores, 
             daemon=True
         )
         server_thread.start()
         
-        # Hilo 2: Inicia el cliente para conectarse a la Matriz
-        # Este hilo manejará la lógica de reconexión
         client_thread = threading.Thread(
             target=self.run_client_for_matriz, 
             daemon=True
@@ -159,7 +163,6 @@ class DistribuidorServer:
                 with self.lock_surtidores:
                     self.surtidores.append(client_socket)
                 
-                # Inicia un hilo para manejar este surtidor
                 handler_thread = threading.Thread(
                     target=self.handle_surtidor, 
                     args=(client_socket, addr), 
@@ -173,7 +176,6 @@ class DistribuidorServer:
     def handle_surtidor(self, client_socket, addr):
         """Maneja la comunicación entrante de un solo surtidor."""
         
-        # Paso 1: Al conectarse, enviar al surtidor todos los precios actuales
         self.send_current_prices_to_surtidor(client_socket)
         
         try:
@@ -187,17 +189,16 @@ class DistribuidorServer:
                 
                 if isinstance(msg_obj, TransaccionReportMessage):
                     
-                    # --- INICIO DE CAMBIOS ---
-                    # 1. Guardar en BD Local (SQLite)
-                    self._save_transaction(msg_obj) # <--- ¡CAMBIO AÑADIDO!
-
+                    # 1. Guardar en BD Local (SQLite) y obtener ID
+                    db_id = self._save_transaction(msg_obj) # <--- ¡CAMBIO!
+                    
                     # 2. Log actualizado
-                    print(f"🧾 Reporte de Surtidor {msg_obj.surtidor_id} ({addr}): "
-                          f"{msg_obj.litros}L de {msg_obj.combustible} [Guardado en BD]") # <--- ¡CAMBIO MODIFICADO!
-                    # --- FIN DE CAMBIOS ---
+                    log_msg = (f"🧾 Reporte de Surtidor {msg_obj.surtidor_id} ({addr}): "
+                               f"{msg_obj.litros}L de {msg_obj.combustible} [Guardado en BD id={db_id}]")
+                    print(log_msg)
 
-                    # Reenviar la transacción a la Matriz (si está conectada)
-                    self.forward_transaction_to_matriz(msg_obj)
+                    # 3. Reenviar la transacción a la Matriz (si está conectada)
+                    self.forward_transaction_to_matriz(msg_obj, db_id) # <--- ¡CAMBIO!
                     
                 elif isinstance(msg_obj, HeartbeatMessage):
                     print(f"❤️ Heartbeat de Surtidor {msg_obj.id} ({addr})")
@@ -225,7 +226,7 @@ class DistribuidorServer:
                     sock.sendall(framed_msg)
                 except Exception as e:
                     print(f"Error enviando precio de caché a surtidor: {e}")
-                    break # Si falla, probablemente el surtidor se desconectó
+                    break
             print("Precios de caché enviados.")
 
     def broadcast_price_to_surtidores(self, combustible, precio_final):
@@ -244,7 +245,6 @@ class DistribuidorServer:
                 except Exception:
                     disconnected.append(sock)
             
-            # Limpieza de sockets desconectados
             for sock in disconnected:
                 self.surtidores.remove(sock)
                 sock.close()
@@ -268,7 +268,11 @@ class DistribuidorServer:
                 # Identificarse ante la Matriz
                 self.send_to_matriz(HeartbeatMessage(self.id, "online"))
                 
-                # 2. Iniciar bucle de escucha
+                # --- ¡CAMBIO AÑADIDO! ---
+                # 2. Iniciar la sincronización de pendientes
+                self._start_sync_thread()
+                
+                # 3. Iniciar bucle de escucha (era el paso 2)
                 self.listen_to_matriz(sock)
 
             except ConnectionRefusedError:
@@ -293,30 +297,23 @@ class DistribuidorServer:
                 msg_bytes = receive_message(sock)
                 if msg_bytes is None:
                     print("Matriz cerró la conexión.")
-                    break # Rompe el bucle de escucha, lo que activará la reconexión
+                    break 
                 
                 msg_obj = deserialize(msg_bytes)
                 
                 if isinstance(msg_obj, PrecioUpdateMessage):
-                    # --- Lógica de Negocio Principal ---
                     print(f"💸 Precio base recibido de Matriz: {msg_obj.combustible} @ ${msg_obj.precio_base}")
                     
-                    # 1. Calcular precio final con utilidad 
                     precio_final = int(msg_obj.precio_base * UTILIDAD_FACTOR)
                     
-                    # 2. Actualizar caché local 
                     with self.lock_prices:
                         self.current_prices[msg_obj.combustible] = precio_final
                     print(f"💰 Precio final local calculado: {msg_obj.combustible} @ ${precio_final}")
                     
-                    # 3. Transmitir a todos los surtidores
                     self.broadcast_price_to_surtidores(msg_obj.combustible, precio_final)
-                
-                # Podríamos recibir otros tipos de mensajes (ej: comandos admin)
                 
         except ConnectionError as e:
             print(f"Error de conexión escuchando a Matriz: {e}")
-            # La excepción romperá el bucle y activará la reconexión
 
     # --- Funciones de Comunicación (Nivel 2 -> 3) ---
 
@@ -334,27 +331,85 @@ class DistribuidorServer:
                     return True
                 except Exception as e:
                     print(f"Error al enviar a Matriz: {e}")
+                    # Si falla el envío, asumimos desconexión
+                    self.is_connected_to_matriz.clear() 
                     return False
         return False
 
-    def forward_transaction_to_matriz(self, msg_obj: TransaccionReportMessage):
-        """Intenta enviar una transacción a la Matriz."""
+    def forward_transaction_to_matriz(self, msg_obj: TransaccionReportMessage, db_id: int | None):
+        """Intenta enviar una transacción a la Matriz y actualiza su estado sync."""
         
-        # Le añadimos el ID del distribuidor para que la Matriz sepa de quién es
-        # (Esto ya lo hacías, y _save_transaction() también lo hace)
         if not msg_obj.distribuidor_id:
              msg_obj.distribuidor_id = self.id 
         
-        if not self.send_to_matriz(msg_obj):
-            # Aquí se cumple el requisito de tolerancia a fallos
+        if self.send_to_matriz(msg_obj):
+            # --- ¡ÉXITO! La Matriz está online ---
+            if db_id:
+                # Marcarla como sincronizada en la BD
+                self._update_transaction_sync_status(db_id)
+        else:
+            # --- FALLO: La Matriz está offline ---
+            print(f"AVISO: Matriz desconectada. Transacción (id={db_id}) "
+                  "guardada en BD local para sincronización futura.")
+
+    # --- Lógica de Sincronización ---
+
+    def _sync_pending_transactions(self):
+        """Busca transacciones pendientes y las envía a la Matriz."""
+        print("Buscando transacciones pendientes para sincronizar...")
+        
+        pending_txs = []
+        try:
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            cursor = conn.cursor()
+            # Buscar todas las no sincronizadas
+            sql = "SELECT id, surtidor_id, combustible, litros, cargas, distribuidor_id FROM transacciones WHERE sincronizado_matriz = 0"
+            cursor.execute(sql)
+            pending_txs = cursor.fetchall()
+            conn.close()
+        except Exception as e:
+            print(f"Error consultando transacciones pendientes: {e}")
+            return # Salir si falla la consulta
+        
+        if not pending_txs:
+            print("No hay transacciones pendientes. Sincronización completa.")
+            return
             
-            # --- INICIO DE CAMBIOS ---
-            print(f"AVISO: Matriz desconectada. Transacción de {msg_obj.surtidor_id} "
-                  "guardada en BD local para sincronización futura.") # <--- ¡CAMBIO MODIFICADO!
-            # --- FIN DE CAMBIOS ---
+        print(f"Se encontraron {len(pending_txs)} transacciones pendientes. Iniciando envío...")
+        
+        succeeded_count = 0
+        for tx in pending_txs:
+            # Recrear el objeto de mensaje
+            db_id, surtidor_id, combustible, litros, cargas, distribuidor_id = tx
+            msg_obj = TransaccionReportMessage(
+                surtidor=surtidor_id,
+                tipo_combustible=combustible,
+                litros=litros,
+                cargas=cargas,
+                distribuidor_id=distribuidor_id
+            )
             
-            # TODO: Implementar la cola de sincronización.
-            # Por ahora, solo la guardamos en la BD local.
+            # Intentar enviar
+            if self.send_to_matriz(msg_obj):
+                # Si es exitoso, marcar en la BD
+                self._update_transaction_sync_status(db_id)
+                succeeded_count += 1
+                # Pequeña pausa para no saturar
+                time.sleep(0.05) 
+            else:
+                # Si la Matriz se cae *durante* la sincronización
+                print("Se perdió la conexión a la Matriz durante la sincronización. Abortando.")
+                break # Salir del bucle y reintentar en la próxima reconexión
+
+        print(f"Sincronización finalizada. {succeeded_count} transacciones enviadas.")
+
+    def _start_sync_thread(self):
+        """Inicia la sincronización en un hilo separado para no bloquear."""
+        sync_thread = threading.Thread(
+            target=self._sync_pending_transactions, 
+            daemon=True
+        )
+        sync_thread.start()
 
 # --- Punto de entrada del script ---
 if __name__ == "__main__":
@@ -374,7 +429,6 @@ if __name__ == "__main__":
     
     server.start()
     
-    # Mantiene el hilo principal vivo
     try:
         while True:
             time.sleep(1)
