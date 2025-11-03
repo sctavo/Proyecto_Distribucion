@@ -25,21 +25,21 @@ class PrecioLocalUpdateMessage:
     def __repr__(self):
         return f"PrecioLocalUpdate(comb={self.combustible}, final=${self.precio_final})"
 
+# ESTE ES EL CÓDIGO CORREGIDO
 class TransaccionReportMessage:
-    """Surtidor -> Distribuidor"""
-    def __init__(self, surtidor, tipo_combustible, litros, cargas):
-        # NOTA: Ajusté los campos según los requisitos.
-        # El surtidor reporta litros y cargas[cite: 80].
-        # Tu avance mencionaba 'litros' y 'cargas'  (aunque el ejemplo solo usaba litros).
-        # Usaremos ambos para ser más completos.
+    """Surtidor -> Distribuidor -> Matriz"""
+    def __init__(self, surtidor, tipo_combustible, litros, cargas, distribuidor_id=None):
         self.tipo = "TRANSACCION"
         self.surtidor_id = surtidor
         self.combustible = tipo_combustible
         self.litros = litros
         self.cargas = cargas
-        
+        self.distribuidor_id = distribuidor_id 
+
     def __repr__(self):
-        return f"Transaccion(surtidor={self.surtidor_id}, comb={self.combustible}, {self.litros}L, {self.cargas} cargas)"
+        # Actualizamos el 'repr' para que sea más informativo
+        dist_info = f" (de {self.distribuidor_id})" if self.distribuidor_id else ""
+        return f"Transaccion(surtidor={self.surtidor_id}, comb={self.combustible}, {self.litros}L, {self.cargas} cargas{dist_info})"
 
 class HeartbeatMessage:
     """Bidireccional"""

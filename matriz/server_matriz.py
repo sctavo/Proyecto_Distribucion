@@ -89,8 +89,8 @@ class MatrizServer:
                 # 3. Procesa el mensaje
                 if isinstance(msg_obj, TransaccionReportMessage):
                     # TODO: Aquí guardaríamos en la BD Central [cite: 95]
-                    print(f"📈 Reporte de {addr}: "
-                          f"Surtidor {msg_obj.surtidor_id}, "
+                    print(f"📈 Reporte de '{msg_obj.distribuidor_id}' ({addr}): "
+                        f"Surtidor {msg_obj.surtidor_id}, "
                           f"{msg_obj.combustible}, {msg_obj.litros}L, {msg_obj.cargas} cargas")
                           
                 elif isinstance(msg_obj, HeartbeatMessage):
