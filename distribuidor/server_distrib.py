@@ -4,6 +4,8 @@ import threading
 import sys
 import os
 import time
+import sqlite3 # para almacenamiento local de transacciones 
+from datetime import datetime # para timestamps de sqlite
 
 # --- INICIO: Hack para importar 'common' ---
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -32,6 +34,11 @@ class DistribuidorServer:
         self.host = host  # IP en la que escucha a los Surtidores
         self.port = port  # Puerto en el que escucha a los Surtidores
         
+        # ---  Base de datos local --- #
+        self.db_path = f"distribuidor/db_local_{self.id}.sqlite" # <--- DESCOMENTAR PARA BDs SEPARADAS
+        # self.db_path = "distribuidor/db_local.sqlite" # (Usamos una BD compartida para la prueba local) <- No funciona porque se crea condicion de carrera entre distribuidores
+        self._init_db() # Llama a la función de la base de datos
+
         # --- Estado del Servidor (Nivel 2) ---
         self.server_socket = None # Socket para escuchar a los Surtidores
         self.surtidores = [] # Lista de sockets de surtidores conectados
@@ -46,6 +53,73 @@ class DistribuidorServer:
         self.socket_to_matriz = None # Socket conectado a la Matriz
         self.lock_matriz_socket = threading.Lock()
         self.is_connected_to_matriz = threading.Event() # Flag para saber el estado
+
+    # --- INICIO: Funciones de Base de Datos (Corregidas) ---
+    # Estas funciones DEBEN estar DENTRO de la clase DistribuidorServer
+
+    def _init_db(self):
+        """Inicializa la base de datos SQLite y crea la tabla si no existe."""
+        try:
+            # os.makedirs(os.path.dirname(self.db_path), exist_ok=True) # <--- DESCOMENTAR SI USAS BDs SEPARADAS
+            
+            # Conexión a la BD (se crea si no existe)
+            # 'check_same_thread=False' es necesario porque escribiremos a la BD
+            # desde múltiples hilos (los 'handle_surtidor').
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            cursor = conn.cursor()
+            
+            # Crear tabla de transacciones
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS transacciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME NOT NULL,
+                surtidor_id TEXT NOT NULL,
+                combustible TEXT NOT NULL,
+                litros REAL NOT NULL,
+                cargas INTEGER NOT NULL,
+                distribuidor_id TEXT NOT NULL,
+                sincronizado_matriz INTEGER DEFAULT 0 
+            )
+            """)
+            
+            # TODO: Crear tabla para la cola de sincronización (para el requisito de tolerancia a fallos)
+            
+            conn.commit()
+            conn.close()
+            print(f"Base de datos local inicializada en: {self.db_path}")
+        except Exception as e:
+            print(f"Error inicializando la base de datos: {e}")
+
+    def _save_transaction(self, msg: TransaccionReportMessage):
+        """Guarda un reporte de transacción en la base de datos local."""
+        try:
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            cursor = conn.cursor()
+            
+            sql = """
+            INSERT INTO transacciones 
+                (timestamp, surtidor_id, combustible, litros, cargas, distribuidor_id) 
+            VALUES (?, ?, ?, ?, ?, ?)
+            """
+            
+            params = (
+                datetime.now(),
+                msg.surtidor_id,
+                msg.combustible,
+                msg.litros,
+                msg.cargas,
+                self.id # El ID de este distribuidor
+            )
+            
+            cursor.execute(sql, params)
+            conn.commit()
+            conn.close()
+            # print(f"Transacción de {msg.surtidor_id} guardada en BD local.") # Log opcional
+            
+        except Exception as e:
+            print(f"Error guardando transacción en BD local: {e}")
+
+    # --- FIN: Funciones de Base de Datos ---
 
     def start(self):
         """Inicia los dos hilos principales: el servidor y el cliente."""
@@ -112,10 +186,16 @@ class DistribuidorServer:
                 msg_obj = deserialize(msg_bytes)
                 
                 if isinstance(msg_obj, TransaccionReportMessage):
-                    # TODO: Guardar en BD Local (SQLite) [cite: 79]
-                    print(f"🧾 Reporte de Surtidor {msg_obj.surtidor_id} ({addr}): "
-                          f"{msg_obj.litros}L de {msg_obj.combustible}")
                     
+                    # --- INICIO DE CAMBIOS ---
+                    # 1. Guardar en BD Local (SQLite)
+                    self._save_transaction(msg_obj) # <--- ¡CAMBIO AÑADIDO!
+
+                    # 2. Log actualizado
+                    print(f"🧾 Reporte de Surtidor {msg_obj.surtidor_id} ({addr}): "
+                          f"{msg_obj.litros}L de {msg_obj.combustible} [Guardado en BD]") # <--- ¡CAMBIO MODIFICADO!
+                    # --- FIN DE CAMBIOS ---
+
                     # Reenviar la transacción a la Matriz (si está conectada)
                     self.forward_transaction_to_matriz(msg_obj)
                     
@@ -173,7 +253,7 @@ class DistribuidorServer:
 
     def run_client_for_matriz(self):
         """Mantiene una conexión persistente a la Matriz y se reconecta si cae."""
-        while True: # Bucle de reconexión [cite: 90]
+        while True: # Bucle de reconexión
             try:
                 # 1. Intentar conectar
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -261,15 +341,20 @@ class DistribuidorServer:
         """Intenta enviar una transacción a la Matriz."""
         
         # Le añadimos el ID del distribuidor para que la Matriz sepa de quién es
-        msg_obj.distribuidor_id = self.id 
+        # (Esto ya lo hacías, y _save_transaction() también lo hace)
+        if not msg_obj.distribuidor_id:
+             msg_obj.distribuidor_id = self.id 
         
         if not self.send_to_matriz(msg_obj):
-            # Aquí se cumple el requisito de tolerancia a fallos [cite: 90]
+            # Aquí se cumple el requisito de tolerancia a fallos
+            
+            # --- INICIO DE CAMBIOS ---
             print(f"AVISO: Matriz desconectada. Transacción de {msg_obj.surtidor_id} "
-                  "guardada localmente (TODO: encolar en BD para sincronización).")
+                  "guardada en BD local para sincronización futura.") # <--- ¡CAMBIO MODIFICADO!
+            # --- FIN DE CAMBIOS ---
+            
             # TODO: Implementar la cola de sincronización.
             # Por ahora, solo la guardamos en la BD local.
-
 
 # --- Punto de entrada del script ---
 if __name__ == "__main__":
