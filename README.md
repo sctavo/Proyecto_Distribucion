@@ -7,3 +7,4 @@
 cd "C:\Users\gsgsn\OneDrive\Desktop\Proyecto_Distribucion"
 .\scripts\run_local_all.ps1
 
+# a
