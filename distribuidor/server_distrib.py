@@ -21,7 +21,7 @@ from common.messages import (
 # --- FIN: Hack para importar 'common' ---
 
 # --- Configuración del Distribuidor ---
-MATRIZ_HOST = '127.0.0.1'
+MATRIZ_HOST = os.environ.get('MATRIZ_HOST', '127.0.0.1')
 MATRIZ_PORT = 65432
 # Factor de utilidad (ej: 15% de margen)
 UTILIDAD_FACTOR = 1.15 
@@ -423,7 +423,7 @@ if __name__ == "__main__":
 
     server = DistribuidorServer(
         id=DIST_ID, 
-        host='127.0.0.1', 
+        host='0.0.0.0', # Escuchar en todas las interfaces
         port=DIST_PORT
     )
     

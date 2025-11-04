@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  # --- NIVEL 3 ---
+  matriz:
+    build: .  # Usa el Dockerfile en este directorio
+    command: python3 matriz/server_matriz.py
+    ports:
+      - "65432:65432" # Expone el puerto de la matriz
+    volumes:
+      # Mapea la carpeta 'matriz' para que la BD se guarde en tu PC
+      - ./matriz:/app/matriz
+
+  # --- NIVEL 2 (DISTRIBUIDOR 1) ---
+  distribuidor1:
+    build: .
+    command: python3 distribuidor/server_distrib.py Dist-1 65433
+    environment:
+      # Aquí le decimos que 'MATRIZ_HOST' es el servicio 'matriz'
+      - MATRIZ_HOST=matriz
+    volumes:
+      # Mapea la carpeta 'distribuidor'
+      - ./distribuidor:/app/distribuidor
+    depends_on:
+      - matriz
+
+  # --- NIVEL 1 (SURTIDOR 1.1) ---
+  surtidor1_1:
+    build: .
+    command: python3 surtidor/client_surtidor.py S-1.1 65433
+    environment:
+      # Le decimos que se conecte al servicio 'distribuidor1'
+      - DISTRIBUIDOR_HOST=distribuidor1
+    depends_on:
+      - distribuidor1
+
+  # --- NIVEL 2 (DISTRIBUIDOR 2) ---
+  distribuidor2:
+    build: .
+    command: python3 distribuidor/server_distrib.py Dist-2 65434
+    environment:
+      - MATRIZ_HOST=matriz
+    volumes:
+      - ./distribuidor:/app/distribuidor
+    depends_on:
+      - matriz
+
+  # --- NIVEL 1 (SURTIDOR 2.1) ---
+  surtidor2_1:
+    build: .
+    command: python3 surtidor/client_surtidor.py S-2.1 65434
+    environment:
+      - DISTRIBUIDOR_HOST=distribuidor2
+    depends_on:
+      - distribuidor2

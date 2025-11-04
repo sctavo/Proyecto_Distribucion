@@ -28,7 +28,7 @@ import sqlite3
 
 
 # Constantes
-HOST = '127.0.0.1'  # IP local para pruebas
+HOST = '0.0.0.0'  # Escuchar en todas las interfaces
 PORT = 65432        # Puerto para la Matriz
 COMBUSTIBLES = ["93", "95", "97", "Diesel", "Kerosene"] # Tipos válidos
 

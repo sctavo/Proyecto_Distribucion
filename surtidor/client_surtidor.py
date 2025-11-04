@@ -18,7 +18,7 @@ from common.messages import (
 # --- FIN: Hack para importar 'common' ---
 
 # --- Configuración del Surtidor ---
-DISTRIBUIDOR_HOST = '127.0.0.1'
+DISTRIBUIDOR_HOST = os.environ.get('DISTRIBUIDOR_HOST', '127.0.0.1')
 RECONNECT_DELAY = 3
 COMBUSTIBLES = ["93", "95", "97", "Diesel", "Kerosene"]
 
